@@ -179,7 +179,7 @@ def plot_temperature_data(office_df, livingroom_df):
         ).sort_values('timestamp')
         
         # Forward fill missing values
-        combined_df = combined_df.fillna(method='ffill').fillna(method='bfill')
+        combined_df = combined_df.ffill().bfill()
         
         # Calculate average
         combined_df['temp_average'] = (combined_df['temp_office'] + combined_df['temp_livingroom']) / 2
