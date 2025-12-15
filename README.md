@@ -31,6 +31,25 @@ cd govee-heat-loss-tracker
 pip install -r requirements.txt
 ```
 
+3. Configure your Govee API key:
+```bash
+# Copy the example environment file
+cp .env.example .env
+
+# Edit .env and add your Govee API key
+# GOVEE_API_KEY=your_api_key_here
+```
+
+Alternatively, you can set the environment variable directly:
+```bash
+export GOVEE_API_KEY=your_api_key_here
+```
+
+Or use Streamlit secrets (create `.streamlit/secrets.toml`):
+```toml
+GOVEE_API_KEY = "your_api_key_here"
+```
+
 ## Usage
 
 1. Run the Streamlit app:

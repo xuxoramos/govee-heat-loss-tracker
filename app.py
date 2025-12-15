@@ -4,9 +4,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import time
+import os
 
 # Govee API configuration
-GOVEE_API_KEY = "b60cedae-5c36-4a21-8da0-e9c6311a052b"
+GOVEE_API_KEY = os.getenv("GOVEE_API_KEY", "b60cedae-5c36-4a21-8da0-e9c6311a052b")
 GOVEE_API_BASE = "https://developer-api.govee.com"
 
 # Monitor names
@@ -32,6 +33,30 @@ def get_govee_devices():
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching devices: {e}")
         return None
+
+def find_device_by_name(devices_response, device_name):
+    """
+    Find a device by its name from the devices response.
+    
+    Args:
+        devices_response: JSON response from get_govee_devices()
+        device_name: Name to search for (e.g., "aq-monitor-office")
+    
+    Returns:
+        Tuple of (device_id, model) or (None, None) if not found
+    """
+    if not devices_response or 'data' not in devices_response:
+        return None, None
+    
+    devices = devices_response.get('data', {}).get('devices', [])
+    
+    for device in devices:
+        # Check if device name contains the search term
+        dev_name = device.get('deviceName', '').lower()
+        if device_name.lower() in dev_name:
+            return device.get('device'), device.get('model')
+    
+    return None, None
 
 def get_device_state(device_id, model):
     """Fetch current state of a Govee device."""
@@ -136,7 +161,7 @@ def calculate_temperature_drop_rate(df):
     df['temp_rate'] = df['temp_diff'] / df['time_diff_minutes']
     
     # Return average rate (excluding first NaN value)
-    return df['temp_rate'].mean()
+    return df['temp_rate'].mean(skipna=True)
 
 def plot_temperature_data(office_df, livingroom_df):
     """
@@ -178,7 +203,8 @@ def plot_temperature_data(office_df, livingroom_df):
             how='outer'
         ).sort_values('timestamp')
         
-        # Forward fill missing values
+        # Forward fill missing values to align timestamps
+        # This ensures we can calculate averages when monitors don't report at exactly the same time
         combined_df = combined_df.ffill().bfill()
         
         # Calculate average
@@ -243,13 +269,26 @@ def main():
     if st.button("Start Data Collection", type="primary"):
         st.info(f"Collecting data for {duration} minutes with {interval}-second intervals...")
         
-        # For demo purposes, we'll use mock device IDs
-        # In production, these would be retrieved from the devices list
-        office_device_id = "AQ:01:23:45:67:89"  # Placeholder
-        office_model = "H5179"  # Placeholder - typical Govee AQ monitor model
+        # Fetch devices dynamically
+        devices = get_govee_devices()
         
-        livingroom_device_id = "AQ:01:23:45:67:90"  # Placeholder
-        livingroom_model = "H5179"  # Placeholder
+        if not devices:
+            st.error("Failed to fetch devices from Govee API. Please check your API key and network connection.")
+            st.stop()
+        
+        # Find office monitor
+        office_device_id, office_model = find_device_by_name(devices, MONITORS["office"])
+        if not office_device_id:
+            st.warning(f"Office monitor '{MONITORS['office']}' not found. Using fallback values for demonstration.")
+            office_device_id = "AQ:01:23:45:67:89"  # Fallback
+            office_model = "H5179"  # Fallback
+        
+        # Find living room monitor
+        livingroom_device_id, livingroom_model = find_device_by_name(devices, MONITORS["livingroom"])
+        if not livingroom_device_id:
+            st.warning(f"Living room monitor '{MONITORS['livingroom']}' not found. Using fallback values for demonstration.")
+            livingroom_device_id = "AQ:01:23:45:67:90"  # Fallback
+            livingroom_model = "H5179"  # Fallback
         
         # Create tabs for each monitor
         tab1, tab2, tab3 = st.tabs(["Office Monitor", "Living Room Monitor", "Combined Analysis"])
