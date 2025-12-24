@@ -1,408 +1,351 @@
 import streamlit as st
-import requests
 import pandas as pd
+import numpy as np
+import glob
+from scipy.signal import find_peaks
+from sklearn.linear_model import HuberRegressor
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import time
-import os
+from plotly.subplots import make_subplots
 
-# Govee API configuration
-GOVEE_API_KEY = os.getenv("GOVEE_API_KEY", "b60cedae-5c36-4a21-8da0-e9c6311a052b")
-GOVEE_API_BASE = "https://developer-api.govee.com"
+# Page configuration
+st.set_page_config(page_title="Heat Loss Tracker", layout="wide")
 
-# Monitor names
-MONITORS = {
-    "office": "aq-monitor-office",
-    "livingroom": "aq-monitor-livingroom"
-}
+# Title
+st.title("🌡️ Heat Loss Tracker")
+st.markdown("Analysis of temperature cooling rates in different rooms")
 
-def get_govee_devices():
-    """Fetch list of Govee devices."""
-    headers = {
-        "Govee-API-Key": GOVEE_API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        response = requests.get(
-            f"{GOVEE_API_BASE}/v1/devices",
-            headers=headers
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching devices: {e}")
-        return None
+# Sidebar for data loading
+st.sidebar.header("Data Configuration")
 
-def find_device_by_name(devices_response, device_name):
-    """
-    Find a device by its name from the devices response.
+@st.cache_data
+def load_data():
+    """Load and preprocess the data"""
+    # Read livingroom CSV files
+    livingroom_files = glob.glob('data/aq-monitor-livingroom*.csv')
+    livingroom = pd.concat([pd.read_csv(f) for f in livingroom_files], ignore_index=True)
     
-    Args:
-        devices_response: JSON response from get_govee_devices()
-        device_name: Name to search for (e.g., "aq-monitor-office")
+    # Read office CSV files
+    office_files = glob.glob('data/aq-monitor-office*.csv')
+    office = pd.concat([pd.read_csv(f) for f in office_files], ignore_index=True)
     
-    Returns:
-        Tuple of (device_id, model) or (None, None) if not found
-    """
-    if not devices_response or 'data' not in devices_response:
-        return None, None
-    
-    devices = devices_response.get('data', {}).get('devices', [])
-    
-    for device in devices:
-        # Check if device name contains the search term
-        dev_name = device.get('deviceName', '').lower()
-        if device_name.lower() in dev_name:
-            return device.get('device'), device.get('model')
-    
-    return None, None
-
-def get_device_state(device_id, model):
-    """Fetch current state of a Govee device."""
-    headers = {
-        "Govee-API-Key": GOVEE_API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    params = {
-        "device": device_id,
-        "model": model
-    }
-    
-    try:
-        response = requests.get(
-            f"{GOVEE_API_BASE}/v1/devices/state",
-            headers=headers,
-            params=params
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching device state: {e}")
-        return None
-
-def collect_temperature_data(device_id, model, device_name, duration_minutes=60, interval_seconds=60):
-    """
-    Collect temperature data from a device over a specified duration.
-    
-    Args:
-        device_id: Device ID
-        model: Device model
-        device_name: Human-readable device name
-        duration_minutes: How long to collect data (default 60 minutes)
-        interval_seconds: How often to poll (default 60 seconds)
-    
-    Returns:
-        DataFrame with timestamp and temperature columns
-    """
-    data = []
-    start_time = datetime.now()
-    end_time = start_time + timedelta(minutes=duration_minutes)
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    iteration = 0
-    total_iterations = duration_minutes * 60 // interval_seconds
-    
-    while datetime.now() < end_time:
-        state = get_device_state(device_id, model)
-        
-        if state and 'data' in state:
-            properties = state['data'].get('properties', [])
-            temp_data = next((p for p in properties if p.get('key') == 'temperature'), None)
-            
-            if temp_data:
-                temperature = temp_data.get('value', 0) / 100.0  # Govee returns temp in hundredths
-                timestamp = datetime.now()
-                data.append({
-                    'timestamp': timestamp,
-                    'temperature': temperature,
-                    'device': device_name
-                })
-                
-                status_text.text(f"Collecting data from {device_name}: {temperature}°C at {timestamp.strftime('%H:%M:%S')}")
-        
-        iteration += 1
-        progress_bar.progress(min(iteration / total_iterations, 1.0))
-        
-        if datetime.now() < end_time:
-            time.sleep(interval_seconds)
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    return pd.DataFrame(data)
-
-def calculate_temperature_drop_rate(df):
-    """
-    Calculate the average temperature drop per minute in 1-hour windows.
-    
-    Args:
-        df: DataFrame with timestamp and temperature columns
-    
-    Returns:
-        Average temperature drop per minute (negative value indicates cooling)
-    """
-    if len(df) < 2:
-        return 0.0
+    # Standardize column names
+    livingroom.columns = ['timestamp', 'pm25', 'temperature_f', 'humidity']
+    office.columns = ['timestamp', 'pm25', 'temperature_f', 'humidity']
     
     # Sort by timestamp
-    df = df.sort_values('timestamp')
+    livingroom = livingroom.sort_values(by='timestamp', ascending=True)
+    office = office.sort_values(by='timestamp', ascending=True)
     
-    # Calculate time differences in minutes
-    df['time_diff_minutes'] = df['timestamp'].diff().dt.total_seconds() / 60.0
+    # Convert temperature from Fahrenheit to Celsius
+    livingroom['temperature_c'] = (livingroom['temperature_f'] - 32) * 5/9
+    office['temperature_c'] = (office['temperature_f'] - 32) * 5/9
     
-    # Calculate temperature differences
-    df['temp_diff'] = df['temperature'].diff()
+    # Drop the Fahrenheit column
+    livingroom = livingroom.drop('temperature_f', axis=1)
+    office = office.drop('temperature_f', axis=1)
     
-    # Calculate rate of change (degrees per minute)
-    df['temp_rate'] = df['temp_diff'] / df['time_diff_minutes']
+    # Convert timestamp to datetime
+    livingroom['datetime'] = pd.to_datetime(livingroom['timestamp'])
+    office['datetime'] = pd.to_datetime(office['timestamp'])
     
-    # Return average rate (excluding first NaN value)
-    return df['temp_rate'].mean(skipna=True)
+    # Filter records between midnight and 7 AM
+    livingroom_hours = livingroom[(livingroom['datetime'].dt.hour >= 0) & (livingroom['datetime'].dt.hour < 7)]
+    office_hours = office[(office['datetime'].dt.hour >= 0) & (office['datetime'].dt.hour < 7)]
+    
+    # Keep records from October to December only
+    livingroom_hours_months = livingroom_hours[livingroom_hours['datetime'].dt.month.isin([11, 12])]
+    office_hours_months = office_hours[office_hours['datetime'].dt.month.isin([11, 12])]
+    
+    return livingroom_hours_months, office_hours_months
 
-def plot_temperature_data(office_df, livingroom_df):
-    """
-    Plot temperature data from both monitors and their average.
+def insert_gaps(df):
+    """Insert NaN temperature record before the first of every day"""
+    first_records = df[df['datetime'].dt.hour == 0].groupby(df['datetime'].dt.date).first()
+    gaps = first_records.copy()
+    gaps['temperature_c'] = np.nan
+    gaps['datetime'] = gaps['datetime'] - pd.Timedelta(minutes=1)
+    df_with_gaps = pd.concat([df, gaps]).sort_values(by='datetime').reset_index(drop=True)
+    return df_with_gaps
+
+def add_peak_column(df):
+    """Detect peaks and add the is_peak column to the dataframe"""
+    df['is_peak'] = 0
+    for date in df['datetime'].dt.date.unique():
+        daily_data = df[df['datetime'].dt.date == date]
+        peaks, _ = find_peaks(daily_data['temperature_c'].dropna(), distance=20, prominence=0.3, width=10)
+        peak_indices = daily_data.iloc[peaks].index
+        df.loc[peak_indices, 'is_peak'] = 1
+    return df
+
+def calculate_cooling_rates(df):
+    """Calculate cooling rate for segments between peaks"""
+    df['cooling_rate'] = np.nan
+    peak_indices = df[df['is_peak'] == 1].index.tolist()
     
-    Args:
-        office_df: DataFrame with office monitor data
-        livingroom_df: DataFrame with living room monitor data
-    """
+    for i in range(len(peak_indices) - 1):
+        start_idx = peak_indices[i]
+        end_idx = peak_indices[i + 1]
+        
+        segment = df.loc[start_idx:end_idx].copy()
+        segment_clean = segment.dropna(subset=['temperature_c'])
+        
+        if len(segment_clean) >= 2:
+            X = np.arange(len(segment_clean)).reshape(-1, 1)
+            y = segment_clean['temperature_c'].values
+            
+            huber = HuberRegressor()
+            huber.fit(X, y)
+            
+            cooling_rate = huber.coef_[0]
+            df.loc[start_idx:end_idx, 'cooling_rate'] = cooling_rate
+    
+    return df
+
+def create_temperature_plot(df, room_name):
+    """Create temperature time series plot with cooling rates"""
     fig = go.Figure()
     
-    # Plot office monitor
-    if not office_df.empty:
-        fig.add_trace(go.Scatter(
-            x=office_df['timestamp'],
-            y=office_df['temperature'],
-            mode='lines+markers',
-            name='Office Monitor',
-            line=dict(color='blue')
-        ))
+    fig.add_trace(go.Scatter(
+        x=df['datetime'],
+        y=df['temperature_c'],
+        mode='lines',
+        name=f'{room_name} Temperature',
+        line=dict(color='blue'),
+        showlegend=False
+    ))
     
-    # Plot living room monitor
-    if not livingroom_df.empty:
-        fig.add_trace(go.Scatter(
-            x=livingroom_df['timestamp'],
-            y=livingroom_df['temperature'],
-            mode='lines+markers',
-            name='Living Room Monitor',
-            line=dict(color='green')
-        ))
+    peaks_data = df[df['is_peak'] == 1]
+    for idx, row in peaks_data.iterrows():
+        fig.add_vline(
+            x=row['datetime'],
+            line_dash="dot",
+            line_color="red",
+            opacity=0.5
+        )
     
-    # Calculate and plot average
-    if not office_df.empty and not livingroom_df.empty:
-        # Merge dataframes on timestamp (or use nearest timestamp)
-        combined_df = pd.merge(
-            office_df[['timestamp', 'temperature']].rename(columns={'temperature': 'temp_office'}),
-            livingroom_df[['timestamp', 'temperature']].rename(columns={'temperature': 'temp_livingroom'}),
-            on='timestamp',
-            how='outer'
-        ).sort_values('timestamp')
+    peak_indices = df[df['is_peak'] == 1].index.tolist()
+    
+    for i in range(len(peak_indices) - 1):
+        start_idx = peak_indices[i]
+        end_idx = peak_indices[i + 1]
         
-        # Forward fill missing values to align timestamps
-        # This ensures we can calculate averages when monitors don't report at exactly the same time
-        combined_df = combined_df.ffill().bfill()
+        segment = df.loc[start_idx:end_idx]
+        cooling_rate = segment['cooling_rate'].iloc[0]
         
-        # Calculate average
-        combined_df['temp_average'] = (combined_df['temp_office'] + combined_df['temp_livingroom']) / 2
-        
-        fig.add_trace(go.Scatter(
-            x=combined_df['timestamp'],
-            y=combined_df['temp_average'],
-            mode='lines+markers',
-            name='Average',
-            line=dict(color='red', dash='dash')
-        ))
+        if pd.notna(cooling_rate):
+            mid_datetime = segment['datetime'].iloc[len(segment)//2]
+            mid_temp = segment['temperature_c'].iloc[len(segment)//2]
+            
+            fig.add_annotation(
+                x=mid_datetime,
+                y=mid_temp,
+                text=f'{cooling_rate:.4f}',
+                showarrow=False,
+                font=dict(size=10, color='darkgreen'),
+                bgcolor='rgba(255, 255, 255, 0.7)',
+                bordercolor='darkgreen',
+                borderwidth=1
+            )
     
     fig.update_layout(
-        title='Temperature Readings from Govee AQ Monitors',
-        xaxis_title='Time',
-        yaxis_title='Temperature (°C)',
+        title=f'{room_name} Temperature Time Series with Cooling Rates',
+        xaxis=dict(
+            title='Timestamp',
+            rangeselector=dict(
+                buttons=[
+                    dict(count=1, label='1d', step='day', stepmode='backward'),
+                    dict(count=7, label='1w', step='day', stepmode='backward'),
+                    dict(count=1, label='1m', step='month', stepmode='backward'),
+                    dict(step='all')
+                ]
+            ),
+            rangeslider=dict(visible=True)
+        ),
+        yaxis=dict(title='Temperature (°C)'),
         hovermode='x unified',
-        height=500
+        showlegend=False
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
-def main():
-    st.set_page_config(
-        page_title="Govee Heat Loss Tracker",
-        page_icon="🌡️",
-        layout="wide"
+def create_daily_stats_plot(daily_stats):
+    """Create daily statistics plot with subplots for each room"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=('Office', 'Living Room'),
+        vertical_spacing=0.12,
+        specs=[[{"secondary_y": True}], [{"secondary_y": True}]]
     )
     
-    st.title("🌡️ Govee Heat Loss Tracker")
-    st.markdown("Track temperature readings from Govee Air Quality Monitors and calculate heat loss rates.")
-    
-    # Sidebar configuration
-    st.sidebar.header("Configuration")
-    
-    duration = st.sidebar.slider(
-        "Data Collection Duration (minutes)",
-        min_value=10,
-        max_value=120,
-        value=60,
-        step=5
+    # Office traces
+    fig.add_trace(
+        go.Scatter(
+            x=daily_stats['date'],
+            y=daily_stats['mean_cooling_rate_office'],
+            mode='lines',
+            name='Office Mean',
+            line=dict(color='blue')
+        ),
+        row=1, col=1, secondary_y=False
     )
     
-    interval = st.sidebar.slider(
-        "Polling Interval (seconds)",
-        min_value=30,
-        max_value=300,
-        value=60,
-        step=30
+    fig.add_trace(
+        go.Scatter(
+            x=daily_stats['date'],
+            y=daily_stats['median_cooling_rate_office'],
+            mode='lines',
+            name='Office Median',
+            line=dict(color='blue', dash='dash')
+        ),
+        row=1, col=1, secondary_y=False
     )
     
-    # Show device information
-    st.header("Connected Devices")
+    fig.add_trace(
+        go.Bar(
+            x=daily_stats['date'],
+            y=daily_stats['daily_min_temp'],
+            name='Min Temp',
+            marker=dict(color='red', opacity=0.3),
+            showlegend=True
+        ),
+        row=1, col=1, secondary_y=True
+    )
     
-    with st.expander("View Device List"):
-        devices = get_govee_devices()
-        if devices:
-            st.json(devices)
+    # Living room traces
+    fig.add_trace(
+        go.Scatter(
+            x=daily_stats['date'],
+            y=daily_stats['mean_cooling_rate_livingroom'],
+            mode='lines',
+            name='Living Room Mean',
+            line=dict(color='green')
+        ),
+        row=2, col=1, secondary_y=False
+    )
     
-    # Main collection button
-    if st.button("Start Data Collection", type="primary"):
-        st.info(f"Collecting data for {duration} minutes with {interval}-second intervals...")
-        
-        # Fetch devices dynamically
-        devices = get_govee_devices()
-        
-        if not devices:
-            st.error("Failed to fetch devices from Govee API. Please check your API key and network connection.")
-            st.stop()
-        
-        # Find office monitor
-        office_device_id, office_model = find_device_by_name(devices, MONITORS["office"])
-        if not office_device_id:
-            st.warning(f"Office monitor '{MONITORS['office']}' not found. Using fallback values for demonstration.")
-            office_device_id = "AQ:01:23:45:67:89"  # Fallback
-            office_model = "H5179"  # Fallback
-        
-        # Find living room monitor
-        livingroom_device_id, livingroom_model = find_device_by_name(devices, MONITORS["livingroom"])
-        if not livingroom_device_id:
-            st.warning(f"Living room monitor '{MONITORS['livingroom']}' not found. Using fallback values for demonstration.")
-            livingroom_device_id = "AQ:01:23:45:67:90"  # Fallback
-            livingroom_model = "H5179"  # Fallback
-        
-        # Create tabs for each monitor
-        tab1, tab2, tab3 = st.tabs(["Office Monitor", "Living Room Monitor", "Combined Analysis"])
-        
-        # Collect data from office monitor
-        with tab1:
-            st.subheader("Office Monitor Data Collection")
-            office_df = collect_temperature_data(
-                office_device_id,
-                office_model,
-                "Office",
-                duration,
-                interval
-            )
-            
-            if not office_df.empty:
-                st.success(f"Collected {len(office_df)} data points from office monitor")
-                st.dataframe(office_df)
-            else:
-                st.warning("No data collected from office monitor")
-        
-        # Collect data from living room monitor
-        with tab2:
-            st.subheader("Living Room Monitor Data Collection")
-            livingroom_df = collect_temperature_data(
-                livingroom_device_id,
-                livingroom_model,
-                "Living Room",
-                duration,
-                interval
-            )
-            
-            if not livingroom_df.empty:
-                st.success(f"Collected {len(livingroom_df)} data points from living room monitor")
-                st.dataframe(livingroom_df)
-            else:
-                st.warning("No data collected from living room monitor")
-        
-        # Combined analysis
-        with tab3:
-            st.subheader("Temperature Analysis")
-            
-            # Calculate temperature drop rates
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                office_rate = calculate_temperature_drop_rate(office_df) if not office_df.empty else 0.0
-                st.metric(
-                    "Office - Temp Change Rate",
-                    f"{office_rate:.4f} °C/min",
-                    delta=f"{office_rate * 60:.2f} °C/hour"
-                )
-            
-            with col2:
-                livingroom_rate = calculate_temperature_drop_rate(livingroom_df) if not livingroom_df.empty else 0.0
-                st.metric(
-                    "Living Room - Temp Change Rate",
-                    f"{livingroom_rate:.4f} °C/min",
-                    delta=f"{livingroom_rate * 60:.2f} °C/hour"
-                )
-            
-            with col3:
-                avg_rate = (office_rate + livingroom_rate) / 2
-                st.metric(
-                    "Average Temp Change Rate",
-                    f"{avg_rate:.4f} °C/min",
-                    delta=f"{avg_rate * 60:.2f} °C/hour"
-                )
-            
-            # Plot temperature data
-            st.subheader("Temperature Trends")
-            plot_temperature_data(office_df, livingroom_df)
-            
-            # Show summary statistics
-            st.subheader("Summary Statistics")
-            
-            summary_data = []
-            
-            if not office_df.empty:
-                summary_data.append({
-                    'Monitor': 'Office',
-                    'Min Temp (°C)': office_df['temperature'].min(),
-                    'Max Temp (°C)': office_df['temperature'].max(),
-                    'Avg Temp (°C)': office_df['temperature'].mean(),
-                    'Std Dev': office_df['temperature'].std(),
-                    'Change Rate (°C/min)': office_rate
-                })
-            
-            if not livingroom_df.empty:
-                summary_data.append({
-                    'Monitor': 'Living Room',
-                    'Min Temp (°C)': livingroom_df['temperature'].min(),
-                    'Max Temp (°C)': livingroom_df['temperature'].max(),
-                    'Avg Temp (°C)': livingroom_df['temperature'].mean(),
-                    'Std Dev': livingroom_df['temperature'].std(),
-                    'Change Rate (°C/min)': livingroom_rate
-                })
-            
-            if summary_data:
-                st.table(pd.DataFrame(summary_data))
+    fig.add_trace(
+        go.Scatter(
+            x=daily_stats['date'],
+            y=daily_stats['median_cooling_rate_livingroom'],
+            mode='lines',
+            name='Living Room Median',
+            line=dict(color='green', dash='dash')
+        ),
+        row=2, col=1, secondary_y=False
+    )
     
-    # Instructions
-    st.markdown("---")
-    st.markdown("""
-    ### Instructions
-    1. Ensure your Govee AQ monitors are online and connected
-    2. Configure the data collection duration and polling interval in the sidebar
-    3. Click "Start Data Collection" to begin tracking temperature
-    4. View real-time data collection progress for each monitor
-    5. Analyze temperature trends and heat loss rates in the combined analysis tab
+    fig.add_trace(
+        go.Bar(
+            x=daily_stats['date'],
+            y=daily_stats['daily_min_temp'],
+            name='Min Temp',
+            marker=dict(color='red', opacity=0.3),
+            showlegend=False
+        ),
+        row=2, col=1, secondary_y=True
+    )
     
-    **Note:** The application will poll the Govee API at the specified interval to collect temperature data.
-    A negative change rate indicates cooling (heat loss), while positive indicates warming.
-    """)
+    # Update axes
+    fig.update_xaxes(
+        dtick=7*24*60*60*1000,
+        tickformat='%Y-%m-%d',
+        row=1, col=1
+    )
+    
+    fig.update_xaxes(
+        title_text='Date',
+        dtick=7*24*60*60*1000,
+        tickformat='%Y-%m-%d',
+        row=2, col=1
+    )
+    
+    fig.update_yaxes(title_text='Cooling Rate (°C/min)', row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text='Min Temp (°C)', row=1, col=1, secondary_y=True)
+    fig.update_yaxes(title_text='Cooling Rate (°C/min)', row=2, col=1, secondary_y=False)
+    fig.update_yaxes(title_text='Min Temp (°C)', row=2, col=1, secondary_y=True)
+    
+    fig.update_layout(
+        height=800,
+        title_text='Daily Cooling Rates by Room',
+        hovermode='x unified',
+        showlegend=True
+    )
+    
+    return fig
 
-if __name__ == "__main__":
-    main()
+# Main app
+with st.spinner('Loading data...'):
+    livingroom_hours_months, office_hours_months = load_data()
+
+st.sidebar.success(f"✓ Loaded {len(livingroom_hours_months)} livingroom records")
+st.sidebar.success(f"✓ Loaded {len(office_hours_months)} office records")
+
+# Process data
+with st.spinner('Processing data...'):
+    livingroom_hours_months = insert_gaps(livingroom_hours_months)
+    office_hours_months = insert_gaps(office_hours_months)
+    
+    livingroom_hours_months = add_peak_column(livingroom_hours_months)
+    office_hours_months = add_peak_column(office_hours_months)
+    
+    livingroom_cooling_rates = calculate_cooling_rates(livingroom_hours_months)
+    office_cooling_rates = calculate_cooling_rates(office_hours_months)
+
+# Create tabs
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Office Analysis", "🏠 Living Room Analysis", "📈 Daily Statistics", "📋 Data Tables"])
+
+with tab1:
+    st.plotly_chart(create_temperature_plot(office_cooling_rates, "Office"), use_container_width=True)
+
+with tab2:
+    st.plotly_chart(create_temperature_plot(livingroom_cooling_rates, "Living Room"), use_container_width=True)
+
+with tab3:
+    # Calculate daily statistics
+    office_daily_stats = office_cooling_rates.groupby(office_cooling_rates['datetime'].dt.date)['cooling_rate'].agg(['mean', 'median', 'std']).reset_index()
+    office_daily_stats.columns = ['date', 'mean_cooling_rate', 'median_cooling_rate', 'std_cooling_rate']
+    
+    livingroom_daily_stats = livingroom_cooling_rates.groupby(livingroom_cooling_rates['datetime'].dt.date)['cooling_rate'].agg(['mean', 'median', 'std']).reset_index()
+    livingroom_daily_stats.columns = ['date', 'mean_cooling_rate', 'median_cooling_rate', 'std_cooling_rate']
+    
+    daily_stats = pd.merge(office_daily_stats, livingroom_daily_stats, on='date', suffixes=('_office', '_livingroom'))
+    
+    # Load Pittsburgh minimum temperature data
+    pitt_min_temp = pd.read_csv('data/pitt_min_temp.csv')
+    daily_stats['date'] = pd.to_datetime(daily_stats['date'])
+    pitt_min_temp['DATE'] = pd.to_datetime(pitt_min_temp['DATE'])
+    
+    daily_stats = daily_stats.merge(
+        pitt_min_temp[['DATE', 'TMIN']], 
+        left_on='date', 
+        right_on='DATE', 
+        how='left'
+    )
+    
+    daily_stats = daily_stats.rename(columns={'TMIN': 'daily_min_temp'})
+    daily_stats = daily_stats.drop('DATE', axis=1)
+    
+    st.plotly_chart(create_daily_stats_plot(daily_stats), use_container_width=True)
+
+with tab4:
+    st.subheader("Daily Statistics Summary")
+    st.dataframe(daily_stats, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Office Data Sample")
+        st.dataframe(office_cooling_rates.head(20), use_container_width=True)
+    
+    with col2:
+        st.subheader("Living Room Data Sample")
+        st.dataframe(livingroom_cooling_rates.head(20), use_container_width=True)
+
+# Footer
+st.sidebar.markdown("---")
+st.sidebar.markdown("### About")
+st.sidebar.info(
+    "This app analyzes temperature cooling rates in different rooms "
+    "by detecting heating peaks and calculating the rate of temperature "
+    "decrease between peaks during overnight hours (midnight to 7 AM)."
+)

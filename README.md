@@ -1,22 +1,23 @@
 # govee-heat-loss-tracker
 
-Reads data from Govee Air Quality (AQ) sensors and displays the rate of heat loss (celsius per minute).
+Ingest manually exported CSV data from Govee H5106 Air Quality monitors and report on overnight temperature loss (degC per minute).
 
-This Streamlit application connects to Govee AQ monitors ("aq-monitor-office" and "aq-monitor-livingroom") via the Govee API, collects temperature data over configurable time windows, calculates the average temperature change rate per minute, and visualizes the data with interactive charts.
+This Streamlit application reads the CSVs you download from the Govee app (stored under `data/office` and `data/livingroom`), converts Fahrenheit temperatures to Celsius, and summarises how quickly each room cools between midnight and 07:00.
 
 ## Features
 
-- 📊 Real-time temperature data collection from multiple Govee AQ monitors
-- 📈 Calculate average temperature drop/rise rate per minute
-- 📉 Interactive visualization with 3 lines: Office monitor, Living Room monitor, and Average
-- ⏱️ Configurable data collection duration and polling intervals
+- 📁 Load office and living room CSV exports directly from disk (no Bluetooth or API calls)
+- 🔁 Auto-detect the latest export based on the timestamp embedded in the filename
+- 🌡️ Convert Fahrenheit readings to Celsius and focus on overnight data (00:00-07:00)
+- 🕐 Report hourly cooling loss (degC per minute) alongside totals for each monitor
+- 📉 Visualise temperature traces and inspect the raw filtered readings
 - 📱 Responsive web interface built with Streamlit
 
 ## Requirements
 
 - Python 3.8 or higher
-- Govee AQ monitors (aq-monitor-office and aq-monitor-livingroom)
-- Govee API key
+- Govee H5106 Air Quality monitors (manual CSV exports from the Govee app)
+- CSV files placed under `data/office` and `data/livingroom` (filenames include a timestamp such as `aq-monitor-office_export_202511050547.csv`)
 
 ## Installation
 
@@ -31,24 +32,11 @@ cd govee-heat-loss-tracker
 pip install -r requirements.txt
 ```
 
-3. Configure your Govee API key:
-```bash
-# Copy the example environment file
-cp .env.example .env
+3. Export fresh data for each monitor via the Govee mobile app and place the CSV files into:
+   - `data/office`
+   - `data/livingroom`
 
-# Edit .env and add your Govee API key
-# GOVEE_API_KEY=your_api_key_here
-```
-
-Alternatively, you can set the environment variable directly:
-```bash
-export GOVEE_API_KEY=your_api_key_here
-```
-
-Or use Streamlit secrets (create `.streamlit/secrets.toml`):
-```toml
-GOVEE_API_KEY = "your_api_key_here"
-```
+   Filenames should retain the timestamp suffix so the dashboard can sort them chronologically.
 
 ## Usage
 
@@ -59,32 +47,21 @@ streamlit run app.py
 
 2. Open your browser to the URL shown (typically http://localhost:8501)
 
-3. Configure the data collection parameters in the sidebar:
-   - **Data Collection Duration**: How long to collect data (10-120 minutes)
-   - **Polling Interval**: How often to poll the API (30-300 seconds)
+3. In the sidebar, choose which CSV to analyse for each monitor (the latest file is pre-selected).
 
-4. Click "Start Data Collection" to begin tracking temperature
-
-5. View the results in three tabs:
-   - **Office Monitor**: Data from the office AQ monitor
-   - **Living Room Monitor**: Data from the living room AQ monitor
-   - **Combined Analysis**: Side-by-side comparison with metrics and charts
+4. Review the overnight cooling metrics, hourly loss table, temperature chart, and filtered raw readings.
 
 ## How It Works
 
-1. **Data Collection**: The app polls the Govee API at regular intervals to fetch temperature readings from both AQ monitors.
+1. **File discovery**: The app lists CSV exports found in `data/office` and `data/livingroom`, automatically highlighting the most recent file per monitor.
 
-2. **Rate Calculation**: For each monitor, the app calculates the average temperature change rate (°C per minute) over the collection window.
+2. **Parsing**: Column headers are normalised (for example `Timestamp for sample frequency every 1 min min`, `PM2.5(ug/m3)`, `Temperature_Fahrenheit`, `Relative_Humidity`). Timestamps are converted to datetime objects and temperatures are converted to Celsius.
 
-3. **Visualization**: Three lines are plotted:
-   - Blue line: Office monitor temperature
-   - Green line: Living room monitor temperature
-   - Red dashed line: Average of both monitors
+3. **Filtering**: Only measurements between 00:00 and 07:00 are retained for analysis.
 
-4. **Metrics**: The app displays:
-   - Temperature change rate per minute for each monitor
-   - Temperature change per hour (scaled from per-minute rate)
-   - Summary statistics (min, max, average, standard deviation)
+4. **Hourly metrics**: For each hourly window (00:00-01:00 through 06:00-07:00), the app computes the average cooling rate (degC per minute) and the total loss for that hour.
+
+5. **Visualisation and review**: Temperature traces, hourly tables, and the filtered raw readings are displayed for quick inspection.
 
 ## Understanding the Results
 
@@ -92,18 +69,11 @@ streamlit run app.py
 - **Positive change rate**: Indicates warming (heat gain)
 - **Zero change rate**: Temperature is stable
 
-## API Configuration
-
-The app uses the Govee API with the following configuration:
-- **API Endpoint**: https://developer-api.govee.com
-- **API Key**: Configured in app.py
-- **Monitors**: aq-monitor-office and aq-monitor-livingroom
-
 ## Troubleshooting
 
-- **No data collected**: Ensure your Govee monitors are online and properly named in the Govee app
-- **API errors**: Check that your API key is valid and has not exceeded rate limits
-- **Connection issues**: Verify your internet connection and firewall settings
+- **No overnight samples**: Confirm the CSV actually contains readings between 00:00 and 07:00; some exports may start later in the day.
+- **Unexpected column names**: Ensure the CSV headers match the expected layout (`timestamp`, `pm25`, `temp (in F)` or `temp`, `relative humidity`).
+- **Duplicate filenames**: Keep the timestamp suffix intact so the app can pick the latest export automatically.
 
 ## License
 
